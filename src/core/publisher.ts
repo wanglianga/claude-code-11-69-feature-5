@@ -10,8 +10,10 @@
  */
 import type {
   Adjudication,
+  CaseSelectionMode,
   ComputeMode,
   Fact,
+  PolicyCatalog,
   Publication,
   PublishedLot,
   PublishedProject,
@@ -23,6 +25,8 @@ import { EXTRACTOR_VERSION, primaryStage } from './extractor';
 import { PARSER_VERSION } from './parser';
 import { EVALUATOR_VERSION } from './evaluator';
 import { deterministicId, stableStringify, sha256Hex } from './hash';
+import { DEFAULT_POLICY_CATALOG } from './policy';
+import { analyzeSplitProcurement } from './splitAnalysis';
 
 class UF {
   parent = new Map<string, string>();
@@ -62,6 +66,10 @@ export interface PublishInput {
   skippedComponents: number;
   now: number;
   previousPublication?: Publication | null;
+  /** 政策目录（缺失时使用示例目录；不改变既有项目链结论） */
+  policyCatalog?: PolicyCatalog;
+  /** 候选呈现策略：recall 保留全部相连候选，capacity 优先互不重叠代表组合 */
+  splitSelectionMode?: CaseSelectionMode;
 }
 
 export async function publish(input: PublishInput): Promise<Publication> {
@@ -101,12 +109,16 @@ export async function publish(input: PublishInput): Promise<Publication> {
     return supportingByRoot.get(root)!;
   };
   for (const e of edges) {
-    if (isRejected(e) || !isConfirmed(e)) continue;
+    const decision = decisionByEdge.get(e.id)?.decision;
     if (e.type === 'conflict') {
+      // 冲突边永不合并项目；确认与拆分都保留留痕。
+      // split（人工判定为相互独立标段）也进入留痕，并作为“独立计划”依据。
+      if (decision !== 'split' && (isRejected(e) || !isConfirmed(e))) continue;
       ensureMeta(uf.find(e.fromSnapshotId)).conflicts.add(e.id);
       ensureMeta(uf.find(e.toSnapshotId)).conflicts.add(e.id);
       continue;
     }
+    if (isRejected(e) || !isConfirmed(e)) continue;
     const meta = ensureMeta(uf.find(e.fromSnapshotId));
     meta.edges.add(e.id);
     const adj = decisionByEdge.get(e.id);
@@ -233,6 +245,23 @@ export async function publish(input: PublishInput): Promise<Publication> {
       : null;
 
     const meta = ensureMeta(root);
+
+    // 链内被裁决（确认/拆分）的互斥冲突边：视为“独立标段”，不参与拆分采购组合
+    const independentUnits: NonNullable<PublishedProject['independentUnits']> = [];
+    for (const eid of [...meta.conflicts].sort()) {
+      const edge = edges.find((e) => e.id === eid);
+      const adj = decisionByEdge.get(eid);
+      if (!edge || !adj) continue;
+      if (adj.decision !== 'confirm' && adj.decision !== 'split') continue;
+      const pickLots = (sid: string) =>
+        [...new Set((factsBySnapshot.get(sid) ?? []).filter((f) => f.type === 'lot' && f.lotCode).map((f) => f.lotCode!))].sort();
+      independentUnits.push({
+        edgeId: eid,
+        adjudicationId: adj.id,
+        lotSets: [pickLots(edge.fromSnapshotId), pickLots(edge.toSnapshotId)],
+      });
+    }
+
     const provenance: PublishedProject['fieldProvenance'] = {};
     const codeFactSorted = [...codeFacts].sort((a, b) => a.value.localeCompare(b.value) || a.id.localeCompare(b.id));
     const purchaserFactSorted = [...purchaserFacts].sort((a, b) => a.value.localeCompare(b.value) || a.id.localeCompare(b.id));
@@ -254,6 +283,7 @@ export async function publish(input: PublishInput): Promise<Publication> {
       supportingAdjudicationIds: [...meta.adjudications].sort(),
       conflictEdgeIds: [...meta.conflicts].sort(),
       fieldProvenance: provenance,
+      ...(independentUnits.length ? { independentUnits } : {}),
     });
   }
 
@@ -284,6 +314,19 @@ export async function publish(input: PublishInput): Promise<Publication> {
   );
 
   const version = input.previousPublication ? input.previousPublication.version + 1 : 1;
+  const sortedProjects = projects.sort((a, b) => a.projectCode.localeCompare(b.projectCode));
+
+  // ---- 5. 疑似拆分采购组合分析（同一发布水位） ----
+  const splitAnalysis = analyzeSplitProcurement({
+    projects: sortedProjects,
+    facts,
+    snapshots,
+    catalog: input.policyCatalog ?? DEFAULT_POLICY_CATALOG,
+    mode: input.splitSelectionMode ?? 'recall',
+    now,
+    previous: input.previousPublication?.splitAnalysis ?? null,
+  });
+
   const publication: Publication = {
     id: deterministicId('pub', [dependencyHash.slice(0, 16), version]),
     version,
@@ -299,8 +342,9 @@ export async function publish(input: PublishInput): Promise<Publication> {
     evaluatorVersion: EVALUATOR_VERSION,
     extractorVersion: EXTRACTOR_VERSION,
     parserVersion: PARSER_VERSION,
-    projects: projects.sort((a, b) => a.projectCode.localeCompare(b.projectCode)),
+    projects: sortedProjects,
     stats,
+    splitAnalysis,
   };
   return publication;
 }

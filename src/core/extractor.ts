@@ -26,6 +26,16 @@ export const EXTRACTION_RULES: ExtractionRule[] = [
   { id: 'R-STAGE-05', ruleVersion: EXTRACTOR_VERSION, description: '依据标题关键词判定中标/成交结果阶段' },
   { id: 'R-STAGE-06', ruleVersion: EXTRACTOR_VERSION, description: '依据标题关键词判定招标/采购公告阶段（兜底）' },
   { id: 'R-RESULT-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配中标/成交供应商名称' },
+  // ---- 疑似拆分采购组合分析：需求特征事实 ----
+  { id: 'R-TITLE-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配“项目名称/项目标题”标签后的标题，用于标段标题相似性特征' },
+  { id: 'R-CAT-01', ruleVersion: EXTRACTOR_VERSION, description: '依据品类关键词（智慧教室、网络改造、政务云等）形成品类特征并记录关键词原文' },
+  { id: 'R-DEL-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配“交付/实施/供货地点”标签后的地点，形成交付地点特征' },
+  { id: 'R-UNIT-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配“数量：N 台/套/…”中的数量单位，形成数量单位特征' },
+  { id: 'R-LEVEL-01', ruleVersion: EXTRACTOR_VERSION, description: '依据采购人名称中的省/市/区县/厅/局等词推断采购人层级' },
+  { id: 'R-REGION-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配正文中的省级行政区名称，用于选择适用政策目录' },
+  { id: 'R-METHOD-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配“采购方式”后的公开招标/询价等，用于选择适用政策条目' },
+  { id: 'R-PLAN-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配“采购计划编号/计划号”，作为“已有明确独立计划”的证据' },
+  { id: 'R-JOINT-01', ruleVersion: EXTRACTOR_VERSION, description: '匹配“联合采购/联合体采购/共同采购”标记，作为跨部门联合采购的反驳证据' },
 ];
 
 const STAGE_KEYWORDS: { stage: ProcurementStage; ruleId: string; patterns: RegExp[] }[] = [
@@ -54,6 +64,34 @@ export const STAGE_PRIORITY: Record<ProcurementStage, number> = {
 export function primaryStage(stages: ProcurementStage[]): ProcurementStage | null {
   if (stages.length === 0) return null;
   return [...stages].sort((a, b) => STAGE_PRIORITY[a] - STAGE_PRIORITY[b])[0];
+}
+
+/** 品类关键词 → 规范品类（用于需求相似性特征；命中位置即证据） */
+export const CATEGORY_KEYWORDS: [string, string][] = [
+  ['智慧教室', '智慧教室设备'],
+  ['网络改造', '网络改造工程'],
+  ['政务云', '政务云资源'],
+  ['应急物资', '应急物资'],
+  ['库房', '仓储设施'],
+  ['货架', '仓储设施'],
+  ['办公家具', '办公家具'],
+  ['打印机', '办公设备'],
+  ['服务器', '信息化设备'],
+  ['系统集成', '系统集成'],
+  ['空调', '空调设备'],
+  ['电梯', '电梯设备'],
+];
+
+/** 省级行政区（用于匹配政策目录；示例目录只覆盖浙江/安徽/四川/江苏） */
+export const REGION_NAMES = ['浙江', '安徽', '四川', '江苏', '上海', '广东', '山东'];
+
+/** 由采购人机构名称推断层级（越具体的层级优先） */
+export function inferPurchaserLevel(name: string): string | null {
+  if (/(?:省|自治区|直辖市)/.test(name)) return '省级';
+  if (/(?:区|县)/.test(name)) return '区县级';
+  if (/(?:市)(?!场)/.test(name)) return '市级';
+  if (/(?:镇|街道|乡)/.test(name)) return '乡镇级';
+  return null;
 }
 
 interface Match {
@@ -146,6 +184,94 @@ function collectMatches(section: StructuredSection): Match[] {
   for (const m of text.matchAll(winner)) {
     push(m, 'R-RESULT-01', m[1].trim(), { winner: m[1].trim() });
   }
+
+  // ---- 需求特征事实（疑似拆分采购组合分析） ----
+  // 标题：项目名称 / 项目标题 / 采购项目名称
+  const title = /(?:项目名称|项目标题|采购项目名称)[：:]\s*([^\n]{2,80})/g;
+  for (const m of text.matchAll(title)) {
+    push(m, 'R-TITLE-01', m[1].trim());
+  }
+  // 品类：依据关键词命中，价值观范围为关键词本身（可回查）
+  for (const [keyword, canonical] of CATEGORY_KEYWORDS) {
+    const idx = text.indexOf(keyword);
+    if (idx >= 0) {
+      out.push({
+        value: canonical,
+        localStart: idx,
+        localEnd: idx + keyword.length,
+        matchedText: keyword,
+        ruleId: 'R-CAT-01',
+      });
+    }
+  }
+  // 交付/实施地点
+  const delivery = /(?:交付|实施|供货|施工|服务)地点[：:]\s*([^\n，,。；;]{2,40})/g;
+  for (const m of text.matchAll(delivery)) {
+    push(m, 'R-DEL-01', m[1].trim());
+  }
+  // 数量单位
+  const unit = /数量[（(]?[^：:）)]*[）)]?[：:]?\s*([0-9]+)\s*(台|套|个|批|件|项|间|台套|千米|公里|平方米|㎡)/g;
+  for (const m of text.matchAll(unit)) {
+    push(m, 'R-UNIT-01', m[2]);
+  }
+  // 采购人层级：由采购人标签后的机构名称推断
+  for (const m of text.matchAll(purchaser)) {
+    const level = inferPurchaserLevel(m[1].trim());
+    if (level) {
+      out.push({
+        value: level,
+        localStart: m.index ?? 0,
+        localEnd: (m.index ?? 0) + m[0].length,
+        matchedText: m[0],
+        ruleId: 'R-LEVEL-01',
+      });
+    }
+  }
+  // 地区：优先“所属地区/所属省份”标签，其次正文中的省级行政区名称
+  const regionLabeled = /(?:所属地区|所属省份|地区)[：:]\s*([^\n，,。；;]{2,20})/g;
+  const regionLabeledRanges: [number, number][] = [];
+  for (const m of text.matchAll(regionLabeled)) {
+    const idx = m.index ?? 0;
+    regionLabeledRanges.push([idx, idx + m[0].length]);
+    const name = REGION_NAMES.find((r) => m[1].includes(r));
+    if (name) {
+      out.push({
+        value: name,
+        localStart: idx,
+        localEnd: idx + m[0].length,
+        matchedText: m[0],
+        ruleId: 'R-REGION-01',
+      });
+    }
+  }
+  for (const regionName of REGION_NAMES) {
+    const idx = text.indexOf(regionName);
+    if (idx < 0) continue;
+    if (regionLabeledRanges.some(([s, e]) => idx >= s && idx < e)) continue;
+    out.push({
+      value: regionName,
+      localStart: idx,
+      localEnd: idx + regionName.length,
+      matchedText: regionName,
+      ruleId: 'R-REGION-01',
+    });
+  }
+  // 采购方式
+  const method = /采购方式[：:]\s*(公开招标|邀请招标|竞争性磋商|竞争性谈判|询价|单一来源)/g;
+  for (const m of text.matchAll(method)) {
+    push(m, 'R-METHOD-01', m[1]);
+  }
+  // 采购计划编号（明确独立计划）
+  const plan = /(?:采购计划编号|采购计划号|计划编号)[：:]\s*([^\n，,。；;]{2,40})/g;
+  for (const m of text.matchAll(plan)) {
+    push(m, 'R-PLAN-01', m[1].trim());
+  }
+  // 联合采购标记
+  const joint = /(?:联合采购|联合体采购|跨部门联合采购|共同采购)/g;
+  for (const m of text.matchAll(joint)) {
+    push(m, 'R-JOINT-01', m[0]);
+  }
+
   // 阶段：按优先级取每个 section 的首个命中
   for (const rule of STAGE_KEYWORDS) {
     for (const re of rule.patterns) {
@@ -166,6 +292,15 @@ function factTypeFromRule(ruleId: string): FactType {
   if (ruleId.startsWith('R-AMT')) return 'amount';
   if (ruleId.startsWith('R-DATE')) return 'date';
   if (ruleId.startsWith('R-STAGE')) return 'stage';
+  if (ruleId.startsWith('R-TITLE')) return 'title';
+  if (ruleId.startsWith('R-CAT')) return 'category';
+  if (ruleId.startsWith('R-DEL')) return 'delivery';
+  if (ruleId.startsWith('R-UNIT')) return 'unit';
+  if (ruleId.startsWith('R-LEVEL')) return 'purchaser_level';
+  if (ruleId.startsWith('R-REGION')) return 'region';
+  if (ruleId.startsWith('R-METHOD')) return 'method';
+  if (ruleId.startsWith('R-PLAN')) return 'plan';
+  if (ruleId.startsWith('R-JOINT')) return 'joint';
   return 'result';
 }
 

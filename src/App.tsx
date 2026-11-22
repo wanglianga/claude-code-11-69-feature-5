@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { WorkerClient } from './workers/workerClient';
 import type { WorkbenchState } from './state/state';
-import type { ComputeMode, ImportBatch, PipelineProgress, Adjudication } from './core/types';
+import type { ComputeMode, ImportBatch, PipelineProgress, Adjudication, CaseSelectionMode, PolicyCatalog } from './core/types';
 import type { ImportFileInput } from './core/engine';
 import { INCREMENTAL_THRESHOLD } from './core/engine';
+import { DEFAULT_POLICY_CATALOG } from './core/policy';
 import { OverviewPage } from './pages/OverviewPage';
 import { ImportPage } from './pages/ImportPage';
 import { SnapshotsPage } from './pages/SnapshotsPage';
 import { AdjudicationPage } from './pages/AdjudicationPage';
 import { ProjectsPage } from './pages/ProjectsPage';
 import { PipelinePage } from './pages/PipelinePage';
+import { SplitAnalysisPage } from './pages/SplitAnalysisPage';
 
-type NavKey = 'overview' | 'import' | 'snapshots' | 'adjudication' | 'projects' | 'pipeline';
+type NavKey = 'overview' | 'import' | 'snapshots' | 'adjudication' | 'projects' | 'split' | 'pipeline';
 
 const NAV: { key: NavKey; label: string }[] = [
   { key: 'overview', label: '总览' },
@@ -19,6 +21,7 @@ const NAV: { key: NavKey; label: string }[] = [
   { key: 'snapshots', label: '快照与证据' },
   { key: 'adjudication', label: '关系裁决' },
   { key: 'projects', label: '项目发布' },
+  { key: 'split', label: '拆分采购分析' },
   { key: 'pipeline', label: '计算流水线' },
 ];
 
@@ -84,6 +87,14 @@ export default function App() {
     await run(() => client.call('recompute', { mode }), `重算与发布完成（${mode}）`);
   };
 
+  const handleSelectionMode = async (mode: CaseSelectionMode): Promise<void> => {
+    await run(() => client.call('setSplitSelectionMode', { mode }), `候选呈现策略：${mode === 'recall' ? '召回优先' : '有限容量'}`);
+  };
+
+  const handlePolicyCatalog = async (catalog: PolicyCatalog, label: string): Promise<void> => {
+    await run(() => client.call('setPolicyCatalog', { catalog }), `政策目录已切换：${label}（重算后生效）`);
+  };
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -118,6 +129,19 @@ export default function App() {
         )}
         {nav === 'projects' && state && (
           <ProjectsPage publications={state.publications} snapshots={state.snapshots} facts={state.facts} />
+        )}
+        {nav === 'split' && state && (
+          <SplitAnalysisPage
+            publications={state.publications}
+            snapshots={state.snapshots}
+            facts={state.facts}
+            policyCatalog={state.meta?.policyCatalog ?? DEFAULT_POLICY_CATALOG}
+            selectionMode={state.meta?.splitSelectionMode ?? 'recall'}
+            busy={busy}
+            onSelectionMode={handleSelectionMode}
+            onPolicyCatalog={handlePolicyCatalog}
+            onRecompute={() => handleRecompute('full')}
+          />
         )}
         {nav === 'pipeline' && state && (
           <PipelinePage

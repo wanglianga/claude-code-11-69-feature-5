@@ -9,7 +9,7 @@
  */
 import { IndexedDbRepository } from '../core/repository';
 import { WorkbenchEngine, type ImportFileInput } from '../core/engine';
-import type { PipelineProgress } from '../core/types';
+import type { CaseSelectionMode, PipelineProgress, PolicyCatalog } from '../core/types';
 
 export type WorkerRequest =
   | { reqId: string; type: 'importBatch'; payload: { label: string; files: ImportFileInput[] } }
@@ -18,6 +18,8 @@ export type WorkerRequest =
   | { reqId: string; type: 'checkConsistency'; payload: undefined }
   | { reqId: string; type: 'replay'; payload: undefined }
   | { reqId: string; type: 'getState'; payload: undefined }
+  | { reqId: string; type: 'setPolicyCatalog'; payload: { catalog: PolicyCatalog } }
+  | { reqId: string; type: 'setSplitSelectionMode'; payload: { mode: CaseSelectionMode } }
   | { reqId: string; type: 'clearAll'; payload: undefined };
 
 export type WorkerResponse =
@@ -43,6 +45,12 @@ async function handle(req: WorkerRequest): Promise<unknown> {
       return engine.checkConsistency();
     case 'replay':
       return engine.replay();
+    case 'setPolicyCatalog':
+      await engine.setPolicyCatalog(req.payload.catalog);
+      return engine.settings();
+    case 'setSplitSelectionMode':
+      await engine.setSplitSelectionMode(req.payload.mode);
+      return engine.settings();
     case 'getState':
       return {
         snapshots: await repo.getAllSnapshots(),

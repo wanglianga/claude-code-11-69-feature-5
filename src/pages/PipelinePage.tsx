@@ -96,7 +96,7 @@ export function PipelinePage(props: {
         {props.publications.length === 0 ? <Empty text="尚未发布" /> : (
           <div className="table-wrap">
             <table>
-              <thead><tr><th>版本</th><th>模式</th><th>重算分量</th><th>跳过分量</th><th>项目/标段</th><th>依赖指纹</th><th>时间</th></tr></thead>
+              <thead><tr><th>版本</th><th>模式</th><th>重算分量</th><th>跳过分量</th><th>项目/标段</th><th>拆分案件</th><th>依赖指纹</th><th>时间</th></tr></thead>
               <tbody>
                 {[...props.publications].sort((a, b) => b.version - a.version).map((p) => (
                   <tr key={p.id}>
@@ -105,6 +105,14 @@ export function PipelinePage(props: {
                     <td>{p.computeScope.recomputedComponents.length}</td>
                     <td>{p.computeScope.skippedComponents}</td>
                     <td>{p.stats.projectCount} / {p.stats.lotCount}</td>
+                    <td className="small-text">
+                      分析 #{p.splitAnalysis?.version ?? '—'}
+                      {p.splitAnalysis && (
+                        <div className="muted">
+                          待核 {p.splitAnalysis.cases.filter((c) => c.status === 'pending_review').length} · 失效 {p.splitAnalysis.cases.filter((c) => c.status === 'invalidated').length}
+                        </div>
+                      )}
+                    </td>
                     <td className="hash">{p.computeScope.dependencyHash.slice(0, 18)}…</td>
                     <td className="small-text">{formatTime(p.createdAt)}</td>
                   </tr>

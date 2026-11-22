@@ -42,6 +42,7 @@ interface SnapshotView {
   stages: ProcurementStage[];
   dates: string[];
   winners: string[];
+  planNos: string[];
 }
 
 function buildView(snapshot: Snapshot, facts: Fact[]): SnapshotView {
@@ -56,6 +57,7 @@ function buildView(snapshot: Snapshot, facts: Fact[]): SnapshotView {
     stages: [],
     dates: [],
     winners: [],
+    planNos: [],
   };
   for (const f of mine) {
     if (f.type === 'project_code') view.codes.add(normalizeCode(f.value));
@@ -65,6 +67,7 @@ function buildView(snapshot: Snapshot, facts: Fact[]): SnapshotView {
     if (f.type === 'stage' && f.stage) view.stages.push(f.stage);
     if (f.type === 'date' && f.isoDate) view.dates.push(f.isoDate);
     if (f.type === 'result' && f.winner) view.winners.push(f.winner);
+    if (f.type === 'plan') view.planNos.push(f.value);
   }
   return view;
 }

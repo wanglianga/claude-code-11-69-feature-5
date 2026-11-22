@@ -33,6 +33,15 @@ export const FACT_TYPE_LABELS: Record<FactType, string> = {
   date: '日期',
   stage: '阶段',
   result: '中标结果',
+  title: '标题',
+  category: '品类',
+  delivery: '交付地点',
+  unit: '数量单位',
+  purchaser_level: '采购人层级',
+  region: '地区',
+  method: '采购方式',
+  plan: '采购计划编号',
+  joint: '联合采购',
 };
 
 export function ruleDescription(ruleId: string): string {

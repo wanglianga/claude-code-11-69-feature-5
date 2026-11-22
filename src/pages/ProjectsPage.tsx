@@ -193,6 +193,20 @@ export function ProjectsPage(props: {
               ))}
             </>
           )}
+
+          {openProject.independentUnits && openProject.independentUnits.length > 0 && (
+            <>
+              <hr className="sep" />
+              <h3>独立标段（裁决拆分依据）</h3>
+              {openProject.independentUnits.map((u) => (
+                <div key={u.edgeId} className="prov">
+                  冲突边 {u.edgeId} · 裁决 {u.adjudicationId}：已判定为相互独立标段
+                  {u.lotSets.map((s, i) => <div key={i}>独立单元 {i + 1}：{`{${s.join('、')}}`}</div>)}
+                  <div>拆分采购分析会将本单元作为“已有明确独立计划”排除出组合</div>
+                </div>
+              ))}
+            </>
+          )}
         </Drawer>
       )}
     </div>

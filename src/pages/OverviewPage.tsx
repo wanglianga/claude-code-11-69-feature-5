@@ -22,6 +22,7 @@ export function OverviewPage(props: { state: WorkbenchState | null }) {
         <div className="tile"><div className="label">事实</div><div className="num">{s?.facts.length ?? 0}</div></div>
         <div className="tile"><div className="label">候选边</div><div className="num">{s?.edges.length ?? 0}</div></div>
         <div className="tile"><div className="label">裁决</div><div className="num">{s?.adjudications.length ?? 0}</div></div>
+        <div className="tile"><div className="label">待核拆分案件</div><div className="num" style={{ color: 'var(--amber)' }}>{pub?.splitAnalysis?.cases.filter((c) => c.status === 'pending_review').length ?? 0}</div></div>
         <div className="tile"><div className="label">发布版本</div><div className="num">{s?.publications.length ?? 0}</div></div>
       </div>
 

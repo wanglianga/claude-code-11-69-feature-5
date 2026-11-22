@@ -11,10 +11,12 @@
  */
 import type {
   Adjudication,
+  CaseSelectionMode,
   ComputeMode,
   Fact,
   ImportBatch,
   PipelineProgress,
+  PolicyCatalog,
   Publication,
   RelationEdge,
   Snapshot,
@@ -26,6 +28,8 @@ import { EXTRACTOR_VERSION, extractFacts } from './extractor';
 import { EVALUATOR_VERSION, evaluateRelations, evaluateRelationsIncremental } from './evaluator';
 import { buildComponents, emptyModel, planIncremental, type ComponentModel } from './incremental';
 import { publish } from './publisher';
+import { DEFAULT_POLICY_CATALOG } from './policy';
+import { splitAnalysisFingerprint } from './splitAnalysis';
 import { deterministicId, normalizeText, sha256Hex, stableStringify } from './hash';
 import type { Repository } from './repository';
 
@@ -44,6 +48,9 @@ export interface EngineMeta {
   lastMode: ComputeMode;
   lastPublicationId: string | null;
   totalImports: number;
+  /** 拆分采购分析：当前政策目录（可切换标签）、候选呈现策略、生成寿命（时间） */
+  policyCatalog: PolicyCatalog;
+  splitSelectionMode: CaseSelectionMode;
 }
 
 export interface ConsistencyReport {
@@ -69,6 +76,8 @@ function defaultMeta(): EngineMeta {
     lastMode: 'full',
     lastPublicationId: null,
     totalImports: 0,
+    policyCatalog: DEFAULT_POLICY_CATALOG,
+    splitSelectionMode: 'recall',
   };
 }
 
@@ -84,7 +93,15 @@ export class WorkbenchEngine {
   }
 
   private async getMeta(): Promise<EngineMeta> {
-    return (await this.repo.getMeta()) ?? defaultMeta();
+    const stored = await this.repo.getMeta();
+    if (!stored) return defaultMeta();
+    // 防御旧版本 meta（缺少拆分采购设置）：补默认值但不覆盖已有设置
+    return {
+      ...defaultMeta(),
+      ...stored,
+      policyCatalog: stored.policyCatalog ?? DEFAULT_POLICY_CATALOG,
+      splitSelectionMode: stored.splitSelectionMode ?? 'recall',
+    };
   }
 
   // ---------------- 导入 ----------------
@@ -212,6 +229,27 @@ export class WorkbenchEngine {
     return adjudication;
   }
 
+  // ---------------- 拆分采购分析设置 ----------------
+
+  /** 切换政策目录（模拟“门槛切换”）；下一次重算生效，不回溯改写历史发布。 */
+  async setPolicyCatalog(catalog: PolicyCatalog): Promise<void> {
+    const meta = await this.getMeta();
+    meta.policyCatalog = catalog;
+    await this.repo.putMeta(meta);
+  }
+
+  /** 选择候选呈现策略：recall 保留全部相连候选；capacity 优先互不重叠代表组合。 */
+  async setSplitSelectionMode(mode: CaseSelectionMode): Promise<void> {
+    const meta = await this.getMeta();
+    meta.splitSelectionMode = mode;
+    await this.repo.putMeta(meta);
+  }
+
+  async settings(): Promise<{ policyCatalog: PolicyCatalog; splitSelectionMode: CaseSelectionMode }> {
+    const meta = await this.getMeta();
+    return { policyCatalog: meta.policyCatalog, splitSelectionMode: meta.splitSelectionMode };
+  }
+
   // ---------------- 重算与发布 ----------------
 
   private resolveMode(requested: ComputeMode | 'auto', snapshotCount: number): ComputeMode {
@@ -235,7 +273,6 @@ export class WorkbenchEngine {
     const snapshots = await this.repo.getAllSnapshots();
     const adjudications = await this.repo.getAllAdjudications();
     const mode = this.resolveMode(requestedMode, snapshots.length);
-
     // ---------- 1. 事实提取：全量模式重提全部；增量模式只提新快照 ----------
     this.progress('extracting', 0, snapshots.length, '事实提取');
     let facts: Fact[] = [];
@@ -310,6 +347,8 @@ export class WorkbenchEngine {
       skippedComponents: effectiveSkipped,
       now,
       previousPublication,
+      policyCatalog: meta.policyCatalog,
+      splitSelectionMode: meta.splitSelectionMode,
     });
 
     // 增量模式不变量校验：干净分量的发布结果必须与上一版逐字段一致
@@ -351,6 +390,7 @@ export class WorkbenchEngine {
     const facts = await this.repo.getAllFacts();
     const adjudications = await this.repo.getAllAdjudications();
     const storedEdges = await this.repo.getAllEdges();
+    const meta = await this.getMeta();
     const fullEdges = this.reapplyAdjudications(evaluateRelations(snapshots, facts, now), adjudications);
     const diffs: string[] = [];
 
@@ -362,10 +402,12 @@ export class WorkbenchEngine {
     const fullPub = await publish({
       snapshots, facts, edges: fullEdges, adjudications,
       mode: 'full', recomputedComponents: [], skippedComponents: 0, now,
+      policyCatalog: meta.policyCatalog, splitSelectionMode: meta.splitSelectionMode,
     });
     const incPub = await publish({
       snapshots, facts, edges: fullEdges, adjudications,
       mode: 'incremental', recomputedComponents: [], skippedComponents: 0, now,
+      policyCatalog: meta.policyCatalog, splitSelectionMode: meta.splitSelectionMode,
     });
     const projectKey = (p: Publication['projects'][number]) =>
       stableStringify({ c: p.projectCode, chain: p.stageChain, lots: p.lots, budget: p.currentBudgetCny, history: p.BudgetHistory, prov: p.fieldProvenance });
@@ -373,6 +415,10 @@ export class WorkbenchEngine {
     const ia = incPub.projects.map(projectKey).sort();
     if (stableStringify(fa) !== stableStringify(ia)) diffs.push('全量与增量发布的项目链/标段/预算不一致');
     if (stableStringify(fullPub.stats) !== stableStringify(incPub.stats)) diffs.push('统计快照不一致');
+    if (fullPub.splitAnalysis && incPub.splitAnalysis &&
+        splitAnalysisFingerprint(fullPub.splitAnalysis) !== splitAnalysisFingerprint(incPub.splitAnalysis)) {
+      diffs.push('全量与增量发布的拆分采购候选组合不一致');
+    }
 
     return {
       equal: diffs.length === 0,
@@ -393,6 +439,7 @@ export class WorkbenchEngine {
     const now = this.clock();
     const snapshots = await this.repo.getAllSnapshots();
     const adjudications = await this.repo.getAllAdjudications();
+    const meta = await this.getMeta();
     const original = await this.repo.getLatestPublication();
 
     // 派生数据全部推倒重来
@@ -408,6 +455,10 @@ export class WorkbenchEngine {
       recomputedComponents: Object.keys(buildComponents(snapshots, edges, adjudications).members).sort(),
       skippedComponents: 0,
       now,
+      policyCatalog: meta.policyCatalog,
+      splitSelectionMode: meta.splitSelectionMode,
+      // 传入历史发布：使拆分采购案件的版本/失效记录与历史一致，便于回放比对
+      previousPublication: original,
     });
 
     const diffs: string[] = [];
@@ -420,6 +471,11 @@ export class WorkbenchEngine {
       if (stableStringify(original.stats) !== stableStringify(rebuilt.stats)) diffs.push('复跑统计快照与历史发布不一致');
       if (stableStringify(original.snapshotWatermark) !== stableStringify(rebuilt.snapshotWatermark)) diffs.push('快照水位不一致');
       if (stableStringify(original.adjudicationWatermark) !== stableStringify(rebuilt.adjudicationWatermark)) diffs.push('裁决水位不一致');
+      // 历史案件回放：同一水位下拆分采购案件版本与候选必须可复现
+      if (original.splitAnalysis && rebuilt.splitAnalysis &&
+          splitAnalysisFingerprint(original.splitAnalysis) !== splitAnalysisFingerprint(rebuilt.splitAnalysis)) {
+        diffs.push('复跑拆分采购候选组合与历史发布不一致');
+      }
     }
     return {
       equal: diffs.length === 0,
